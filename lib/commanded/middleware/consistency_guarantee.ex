@@ -32,14 +32,15 @@ defmodule Commanded.Middleware.ConsistencyGuarantee do
     } = assigns
 
     opts = [consistency: consistency, exclude: dispatcher_pid]
-    
+
     case Subscriptions.wait_for(aggregate_uuid, aggregate_version, opts) do
       :ok ->
         pipeline
 
       {:error, :timeout} ->
+        Logger.warn(fn -> ":timeout, #{DateTime.utc_now()}" end)
         Logger.warn(fn ->
-          "Consistency timeout waiting for aggregate #{inspect(aggregate_uuid)} at version #{
+          "@@Consistency timeout waiting for aggregate #{inspect(aggregate_uuid)} at version #{
             inspect(aggregate_version)
           }"
         end)

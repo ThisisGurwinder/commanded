@@ -4,9 +4,6 @@ defmodule Commanded.Commands.Router do
 
   ## Example
 
-  Define a router module which uses `Commanded.Commands.Router` and configures
-  available commands to dispatch:
-
       defmodule BankRouter do
         use Commanded.Commands.Router
 
@@ -16,17 +13,14 @@ defmodule Commanded.Commands.Router do
           identity: :account_number
       end
 
-    Once configured, you can dispatch a command using the module:
-
       :ok = BankRouter.dispatch(%OpenAccount{
         account_number: "ACC123",
         initial_balance: 1_000
       })
 
-  The `to` option determines which module receives the command being dispatched.
-  This command handler module must implement a `handle/2` function. It receives
-  the aggregate's state and the command to execute. Usually the command handler
-  module will forward the command to the aggregate.
+  The command handler module must implement a `handle/2` function that receives
+  the aggregate's state and the command to execute. It should delegate the
+  command to the aggregate.
 
   ## Dispatch command directly to an aggregate
 
@@ -120,15 +114,10 @@ defmodule Commanded.Commands.Router do
   You can also choose to include the execution result as part of the dispatch result by
   setting `include_execution_result` true.
 
-      {:ok, execution_result} = Router.dispatch(command, include_execution_result: true)
+      {:ok, execution_result} = BankRouter.dispatch(command, include_execution_result: true)
 
-  Or by setting `include_execution_result` in your application config file:
-
-      # config/config.exs
-      config :commanded, include_execution_result: true
-
-  Use this if you need to get information from the events produced by the aggregate
-  but you don't want to wait for the events to be projected.
+  You can use this if you need to get information from the events produced by the aggregate
+  but you can't afford to wait for the events to be projected.
 
   ## Metadata
 
@@ -139,11 +128,7 @@ defmodule Commanded.Commands.Router do
       :ok = BankRouter.dispatch(command, metadata: %{"ip_address" => "127.0.0.1"})
 
   """
-
-  @callback dispatch(struct, keyword()) ::
-              :ok | {:ok, non_neg_integer()} | {:ok, struct} | {:error, term}
-
-  defmacro __using__(_opts) do
+  defmacro __using__(_) do
     quote do
       require Logger
 
@@ -157,18 +142,17 @@ defmodule Commanded.Commands.Router do
       @default [
         middleware: [
           Commanded.Middleware.ExtractAggregateIdentity,
-          Commanded.Middleware.ConsistencyGuarantee
+          Commanded.Middleware.ConsistencyGuarantee,
         ],
         consistency: Application.get_env(:commanded, :default_consistency, :eventual),
-        include_aggregate_version:
-          Application.get_env(:commanded, :include_aggregate_version, false),
-        include_execution_result:
-          Application.get_env(:commanded, :include_execution_result, false),
         dispatch_timeout: 5_000,
         lifespan: Commanded.Aggregates.DefaultLifespan,
         metadata: %{},
         retry_attempts: 10
       ]
+
+      @include_aggregate_version false
+      @include_execution_result false
     end
   end
 
@@ -223,7 +207,7 @@ defmodule Commanded.Commands.Router do
           by =
             case Keyword.get(opts, :by) do
               nil ->
-                raise "#{inspect(aggregate_module)} aggregate identity is missing the `by` option"
+                raise "#{inspect aggregate_module} aggregate identity is missing the `by` option"
 
               by when is_atom(by) ->
                 by
@@ -232,9 +216,7 @@ defmodule Commanded.Commands.Router do
                 by
 
               invalid ->
-                raise "#{inspect(aggregate_module)} aggregate identity has an invalid `by` option: #{
-                        inspect(invalid)
-                      }"
+                raise "#{inspect aggregate_module} aggregate identity has an invalid `by` option: #{inspect invalid}"
             end
 
           prefix =
@@ -245,24 +227,17 @@ defmodule Commanded.Commands.Router do
               prefix when is_function(prefix, 0) ->
                 prefix
 
-              prefix when is_binary(prefix) ->
+              prefix when is_bitstring(prefix) ->
                 prefix
 
               invalid ->
-                raise "#{inspect(aggregate_module)} aggregate has an invalid identity prefix: #{
-                        inspect(invalid)
-                      }"
+                raise "#{inspect aggregate_module} aggregate has an invalid identity prefix: #{inspect invalid}"
             end
 
-          @registered_identities Map.put(@registered_identities, aggregate_module,
-                                   by: by,
-                                   prefix: prefix
-                                 )
+          @registered_identities Map.put(@registered_identities, aggregate_module, [by: by, prefix: prefix])
 
         config ->
-          raise "#{inspect(aggregate_module)} aggregate has already been identified by: `#{
-                  inspect(Keyword.get(config, :by))
-                }`"
+          raise "#{inspect aggregate_module} aggregate has already been identified by: `#{inspect Keyword.get(config, :by)}`"
       end
     end
   end
@@ -291,27 +266,24 @@ defmodule Commanded.Commands.Router do
     :identity_prefix,
     :timeout,
     :lifespan,
-    :consistency
+    :consistency,
   ]
 
   @doc false
   defmacro register(command_module,
-             to: handler,
-             function: function,
-             aggregate: aggregate,
-             identity: identity,
-             identity_prefix: identity_prefix,
-             timeout: timeout,
-             lifespan: lifespan,
-             consistency: consistency
-           ) do
+    to: handler,
+    function: function,
+    aggregate: aggregate,
+    identity: identity,
+    identity_prefix: identity_prefix,
+    timeout: timeout,
+    lifespan: lifespan,
+    consistency: consistency)
+  do
     quote location: :keep do
       if Enum.member?(@registered_commands, unquote(command_module)) do
         raise ArgumentError,
-          message:
-            "Command `#{inspect(unquote(command_module))}` has already been registered in router `#{
-              inspect(__MODULE__)
-            }`"
+          message: "Command `#{inspect unquote(command_module)}` has already been registered in router `#{inspect __MODULE__}`"
       end
 
       # sanity check the configured modules exist
@@ -328,129 +300,31 @@ defmodule Commanded.Commands.Router do
 
           unless function_exported?(unquote(lifespan), :after_event, 1) do
             raise ArgumentError,
-              message:
-                "Aggregate lifespan `#{inspect(unquote(lifespan))}` does not define a callback function: `after_event/1`"
-          end
-
-          unless function_exported?(unquote(lifespan), :after_command, 1) do
-            raise ArgumentError,
-              message:
-                "Aggregate lifespan `#{inspect(unquote(lifespan))}` does not define a callback function: `after_command/1`"
-          end
-
-          unless function_exported?(unquote(lifespan), :after_error, 1) do
-            raise ArgumentError,
-              message:
-                "Aggregate lifespan `#{inspect(unquote(lifespan))}` does not define a callback function: `after_error/1`"
+              message: "Aggregate lifespan `#{inspect unquote(lifespan)}` does not define a callback function: `after_event/1`"
           end
 
         invalid ->
           raise ArgumentError,
-            message:
-              "Invalid `lifespan` configured for #{inspect(unquote(aggregate))}: #{
-                inspect(invalid)
-              }"
+            message: "Invalid `lifespan` configured for #{inspect unquote(aggregate)}: #{inspect invalid}"
       end
 
       unless function_exported?(unquote(handler), unquote(function), 2) do
         raise ArgumentError,
-          message:
-            "Command handler `#{inspect(unquote(handler))}` does not define a `#{
-              unquote(function)
-            }/2` function"
+          message: "Command handler `#{inspect unquote(handler)}` does not define a `#{unquote(function)}/2` function"
       end
 
       @registered_commands [unquote(command_module) | @registered_commands]
-
-      def dispatch(command)
-      def dispatch(%unquote(command_module){} = command), do: do_dispatch(command, [])
-
-      def dispatch(command, timeout_or_opts)
-
-      def dispatch(%unquote(command_module){} = command, :infinity),
-        do: do_dispatch(command, timeout: :infinity)
-
-      def dispatch(%unquote(command_module){} = command, timeout) when is_integer(timeout),
-        do: do_dispatch(command, timeout: timeout)
-
-      def dispatch(%unquote(command_module){} = command, opts),
-        do: do_dispatch(command, opts)
-
-      defp do_dispatch(%unquote(command_module){} = command, opts) do
-        causation_id = Keyword.get(opts, :causation_id)
-        correlation_id = Keyword.get(opts, :correlation_id) || UUID.uuid4()
-
-        consistency =
-          Keyword.get(opts, :consistency) || unquote(consistency) || @default[:consistency]
-
-        metadata = Keyword.get(opts, :metadata) || @default[:metadata]
-        timeout = Keyword.get(opts, :timeout) || unquote(timeout) || @default[:dispatch_timeout]
-
-        include_aggregate_version =
-          Keyword.get(opts, :include_aggregate_version) || @default[:include_aggregate_version]
-
-        include_execution_result =
-          Keyword.get(opts, :include_execution_result) || @default[:include_execution_result]
-
-        lifespan = Keyword.get(opts, :lifespan) || unquote(lifespan) || @default[:lifespan]
-        retry_attempts = Keyword.get(opts, :retry_attempts) || @default[:retry_attempts]
-
-        {identity, identity_prefix} =
-          case Map.get(@registered_identities, unquote(aggregate)) do
-            nil ->
-              {unquote(identity), unquote(identity_prefix)}
-
-            config ->
-              identity = Keyword.get(config, :by) || unquote(identity)
-              prefix = Keyword.get(config, :prefix) || unquote(identity_prefix)
-
-              {identity, prefix}
-          end
-
-        alias Commanded.Commands.Dispatcher
-        alias Commanded.Commands.Dispatcher.Payload
-
-        payload = %Payload{
-          command: command,
-          command_uuid: UUID.uuid4(),
-          causation_id: causation_id,
-          correlation_id: correlation_id,
-          consistency: consistency,
-          handler_module: unquote(handler),
-          handler_function: unquote(function),
-          aggregate_module: unquote(aggregate),
-          identity: identity,
-          identity_prefix: identity_prefix,
-          include_aggregate_version: include_aggregate_version,
-          include_execution_result: include_execution_result,
-          timeout: timeout,
-          lifespan: lifespan,
-          metadata: metadata,
-          middleware: @registered_middleware ++ @default[:middleware],
-          retry_attempts: retry_attempts
-        }
-
-        Dispatcher.dispatch(payload)
-      end
-    end
-  end
-
-  defmacro __before_compile__(_env) do
-    quote generated: true do
-      @doc false
-      def registered_commands, do: @registered_commands
 
       @doc """
       Dispatch the given command to the registered handler.
 
       Returns `:ok` on success, or `{:error, reason}` on failure.
       """
-      @spec dispatch(command :: struct) ::
-              :ok
-              | {:error, :unregistered_command}
-              | {:error, :consistency_timeout}
-              | {:error, reason :: term}
-      def dispatch(command), do: unregistered_command(command)
+      @spec dispatch(command :: struct) :: :ok
+        | {:error, :consistency_timeout}
+        | {:error, reason :: term}
+      def dispatch(command)
+      def dispatch(%unquote(command_module){} = command), do: do_dispatch(command, [])
 
       @doc """
       Dispatch the given command to the registered handler providing a timeout.
@@ -498,19 +372,84 @@ defmodule Commanded.Commands.Router do
       `{:ok, aggregate_version}` or `{:ok, %ExecutionResult{..}}`. Returns
       `{:error, reason}` on failure.
       """
-      @spec dispatch(command :: struct, timeout_or_opts :: integer | :infinity | keyword()) ::
-              :ok
-              | {:error, :unregistered_command}
-              | {:error, :consistency_timeout}
-              | {:error, reason :: term}
-      def dispatch(command, _opts), do: unregistered_command(command)
+      @spec dispatch(command :: struct, timeout_or_opts :: integer | :infinity | keyword()) :: :ok
+        | {:error, :consistency_timeout}
+        | {:error, reason :: term}
+      def dispatch(command, timeout_or_opts)
+
+      def dispatch(%unquote(command_module){} = command, :infinity),
+        do: do_dispatch(command, timeout: :infinity)
+
+      def dispatch(%unquote(command_module){} = command, timeout) when is_integer(timeout),
+        do: do_dispatch(command, timeout: timeout)
+
+      def dispatch(%unquote(command_module){} = command, opts),
+        do: do_dispatch(command, opts)
+
+      defp do_dispatch(%unquote(command_module){} = command, opts) do
+        causation_id = Keyword.get(opts, :causation_id)
+        correlation_id = Keyword.get(opts, :correlation_id) || UUID.uuid4()
+        consistency = Keyword.get(opts, :consistency) || unquote(consistency) || @default[:consistency]
+        metadata = Keyword.get(opts, :metadata) || @default[:metadata]
+        timeout = Keyword.get(opts, :timeout) || unquote(timeout) || @default[:dispatch_timeout]
+        include_aggregate_version = Keyword.get(opts, :include_aggregate_version) || @include_aggregate_version
+        include_execution_result = Keyword.get(opts, :include_execution_result) || @include_execution_result
+        lifespan = Keyword.get(opts, :lifespan) || unquote(lifespan) || @default[:lifespan]
+        retry_attempts = Keyword.get(opts, :retry_attempts) || @default[:retry_attempts]
+
+        {identity, identity_prefix} =
+          case Map.get(@registered_identities, unquote(aggregate)) do
+            nil ->
+              {unquote(identity), unquote(identity_prefix)}
+
+            config ->
+              identity = Keyword.get(config, :by) || unquote(identity)
+              prefix = Keyword.get(config, :prefix) || unquote(identity_prefix)
+
+              {identity, prefix}
+          end
+
+        alias Commanded.Commands.Dispatcher
+        alias Commanded.Commands.Dispatcher.Payload
+
+        payload = %Payload{
+          command: command,
+          command_uuid: UUID.uuid4(),
+          causation_id: causation_id,
+          correlation_id: correlation_id,
+          consistency: consistency,
+          handler_module: unquote(handler),
+          handler_function: unquote(function),
+          aggregate_module: unquote(aggregate),
+          identity: identity,
+          identity_prefix: identity_prefix,
+          include_aggregate_version: include_aggregate_version,
+          include_execution_result: include_execution_result,
+          timeout: timeout,
+          lifespan: lifespan,
+          metadata: metadata,
+          middleware: @registered_middleware ++ @default[:middleware],
+          retry_attempts: retry_attempts
+        }
+
+        Dispatcher.dispatch(payload)
+      end
+    end
+  end
+
+  defmacro __before_compile__(_env) do
+    quote do
+      @doc false
+      def registered_commands, do: @registered_commands
+
+      @doc """
+      Return an error if an unregistered command is dispatched
+      """
+      def dispatch(command), do: unregistered_command(command)
+      def dispatch(command, opts), do: unregistered_command(command)
 
       defp unregistered_command(command) do
-        _ =
-          Logger.error(fn ->
-            "attempted to dispatch an unregistered command: #{inspect(command)}"
-          end)
-
+        Logger.error(fn -> "attempted to dispatch an unregistered command: #{inspect command}" end)
         {:error, :unregistered_command}
       end
     end
@@ -519,7 +458,7 @@ defmodule Commanded.Commands.Router do
   @doc false
   def ensure_module_exists(module) do
     unless Code.ensure_compiled?(module) do
-      raise "module `#{inspect(module)}` does not exist, perhaps you forgot to `alias` the namespace"
+      raise "module `#{inspect module}` does not exist, perhaps you forgot to `alias` the namespace"
     end
   end
 
@@ -528,7 +467,6 @@ defmodule Commanded.Commands.Router do
       {nil, opts} ->
         aggregate = aggregate_or_handler
         parse_opts(opts, [function: :execute, to: aggregate, aggregate: aggregate] ++ result)
-
       {aggregate, opts} ->
         handler = aggregate_or_handler
         parse_opts(opts, [function: :handle, to: handler, aggregate: aggregate] ++ result)

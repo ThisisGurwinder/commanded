@@ -6,10 +6,14 @@ defmodule Commanded.Subscriptions do
   alias Commanded.EventStore.RecordedEvent
   alias Commanded.{PubSub, Subscriptions}
 
+  require Logger
+
   @subscriptions_topic "subscriptions"
   @ack_topic "ack_event"
 
-  defstruct [:streams_table, :started_at, subscribers: []]
+  defstruct streams_table: nil,
+            started_at: nil,
+            subscribers: []
 
   def start_link(arg) do
     GenServer.start_link(__MODULE__, arg, name: __MODULE__)
@@ -70,7 +74,7 @@ defmodule Commanded.Subscriptions do
     receive do
       {:ok, ^stream_uuid, ^stream_version} -> :ok
     after
-      timeout ->
+      10000 ->
         :ok = GenServer.call(__MODULE__, {:unsubscribe, self()})
         {:error, :timeout}
     end
@@ -98,12 +102,10 @@ defmodule Commanded.Subscriptions do
     {:reply, reply, state}
   end
 
-  def handle_call(
-        {:subscribe, stream_uuid, stream_version, opts, pid},
-        _from,
-        %Subscriptions{} = state
-      ) do
+  def handle_call({:subscribe, stream_uuid, stream_version, opts, pid}, _from, %Subscriptions{} = state) do
     {consistency, exclude} = parse_opts(opts)
+
+    Logger.warn(fn -> "SUBSCRIPTION:=> [[[#{stream_uuid}]]] subscribed." end)
 
     %Subscriptions{subscribers: subscribers} = state
 
@@ -123,16 +125,19 @@ defmodule Commanded.Subscriptions do
 
           subscription = {pid, stream_uuid, stream_version, consistency, exclude}
 
+          Logger.warn(fn -> "SUBSCRIPTION:=> [[[#{stream_uuid}]]] NOT GOING TO NOTIFY SUBSCRIBERS AT #{stream_version}" end)
+          Logger.warn(fn -> "-----------------------------------------------------------------------------------------" end)
+
           %Subscriptions{state | subscribers: [subscription | subscribers]}
       end
 
     {:reply, :ok, state}
   end
 
-  def handle_call({:unsubscribe, pid}, _from, %Subscriptions{} = state) do
-    %Subscriptions{subscribers: subscribers} = state
-
-    state = %Subscriptions{state | subscribers: remove_by_pid(subscribers, pid)}
+  def handle_call({:unsubscribe, pid}, _from, %Subscriptions{subscribers: subscribers} = state) do
+    state = %Subscriptions{state |
+      subscribers: remove_by_pid(subscribers, pid),
+    }
 
     {:reply, :ok, state}
   end
@@ -144,9 +149,13 @@ defmodule Commanded.Subscriptions do
     # to support expiry of stale acks
     inserted_at_epoch = monotonic_time() - started_at
 
+    Logger.warn(fn -> "ACK_EVENT: handle_info : name [[[[[#{name}]]]]] stream_version [#{stream_version}]" end)
+
     :ets.insert(streams_table, {{name, stream_uuid}, stream_version, inserted_at_epoch})
 
-    state = %Subscriptions{state | subscribers: notify_subscribers(stream_uuid, state)}
+    state = %Subscriptions{state |
+      subscribers: notify_subscribers(stream_uuid, state),
+    }
 
     {:noreply, state}
   end
@@ -162,10 +171,10 @@ defmodule Commanded.Subscriptions do
     {:noreply, state}
   end
 
-  def handle_info({:DOWN, _ref, :process, pid, _reason}, %Subscriptions{} = state) do
-    %Subscriptions{subscribers: subscribers} = state
-
-    state = %Subscriptions{state | subscribers: remove_by_pid(subscribers, pid)}
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, %Subscriptions{subscribers: subscribers} = state) do
+    state = %Subscriptions{state |
+      subscribers: remove_by_pid(subscribers, pid),
+    }
 
     {:noreply, state}
   end
@@ -173,52 +182,56 @@ defmodule Commanded.Subscriptions do
   defp initial_state do
     %Subscriptions{
       streams_table: :ets.new(:streams, [:set, :private]),
-      started_at: monotonic_time()
+      started_at: monotonic_time(),
     }
   end
 
   defp subscriptions, do: PubSub.list(@subscriptions_topic)
 
   # Have all subscriptions handled the event for the given stream and version
-  defp handled_by_all?(
-         stream_uuid,
-         stream_version,
-         consistency,
-         exclude,
-         %Subscriptions{} = state
-       ) do
+  defp handled_by_all?(stream_uuid, stream_version, consistency, exclude, %Subscriptions{} = state) do
     subscriptions()
     |> Enum.reject(fn {_name, pid} -> MapSet.member?(exclude, pid) end)
     |> Enum.filter(fn {name, _pid} ->
+      # Logger.warn(fn -> " Handled by all filter? #{name}, consistency: #{consistency}" end)
       # Optionally filter subscriptions to those provided by the `consistency` option
       case consistency do
         :strong -> true
         consistency when is_list(consistency) -> Enum.member?(consistency, name)
       end
     end)
-    |> Enum.all?(fn {name, _pid} -> handled_by?(name, stream_uuid, stream_version, state) end)
+    |> Enum.all?(fn {name, _pid} ->
+       x = handled_by?(name, stream_uuid, stream_version, state)
+       Logger.warn(fn -> "SUBSCRIPTION:=> HANDLED #{x} [[[[#{name}]]]]" end)
+       x
+    end)
   end
 
   # Has the named subscription handled the event for the given stream and version
   defp handled_by?(name, stream_uuid, stream_version, %Subscriptions{streams_table: streams_table}) do
+    # Logger.warn(fn -> "SUBSCRIPTION:=> GOING TO HANDLE [[[[#{name}]]]] StreamId #{stream_uuid}" end)
     case :ets.lookup(streams_table, {name, stream_uuid}) do
-      [{{^name, ^stream_uuid}, last_seen, _inserted_at}] when last_seen >= stream_version -> true
-      _ -> false
+      [{{^name, ^stream_uuid}, last_seen, _inserted_at}]->
+          # Logger.warn(fn -> "SUBSCRIPTION:=> FOUND IN CACHE [[[[#{name}]]]] StreamId #{stream_uuid}" end)
+          if (last_seen >= stream_version) do
+            true
+          end
+      x ->
+          false
     end
   end
 
   defp remove_by_pid(subscribers, pid) do
     Enum.reduce(subscribers, subscribers, fn
-      {^pid, _, _, _, _} = subscriber, subscribers -> subscribers -- [subscriber]
-      _subscriber, subscribers -> subscribers
+     ({^pid, _, _, _, _} = subscriber, subscribers) -> subscribers -- [subscriber]
+     (_subscriber, subscribers) -> subscribers
     end)
   end
 
   # Notify any subscribers waiting on a given stream if it is at the expected version
   defp notify_subscribers(stream_uuid, %Subscriptions{subscribers: subscribers} = state) do
     Enum.reduce(subscribers, subscribers, fn
-      {pid, ^stream_uuid, expected_stream_version, consistency, exclude} = subscriber,
-      subscribers ->
+      ({pid, ^stream_uuid, expected_stream_version, consistency, exclude} = subscriber, subscribers) ->
         case handled_by_all?(stream_uuid, expected_stream_version, consistency, exclude, state) do
           true ->
             notify_subscriber(pid, stream_uuid, expected_stream_version)
@@ -227,15 +240,17 @@ defmodule Commanded.Subscriptions do
             subscribers -- [subscriber]
 
           false ->
+            Logger.warn(fn -> "SUBSCRIPTIONS:=> COULD NOT NOTIFY #{inspect stream_uuid}, #{DateTime.utc_now()}" end)
+
             subscribers
         end
 
-      _subscriber, subscribers ->
-        subscribers
+      (_subscriber, subscribers) -> subscribers
     end)
   end
 
   defp notify_subscriber(pid, stream_uuid, stream_version) do
+    Logger.warn(fn -> "SUBSCRIPTIONS:=> SUCCESSFULLY SEND DATA TO #{inspect pid} #{DateTime.utc_now()}" end)
     send(pid, {:ok, stream_uuid, stream_version})
   end
 
@@ -245,10 +260,8 @@ defmodule Commanded.Subscriptions do
   end
 
   # Delete subscription ack's that are older than the configured ttl
-  defp purge_expired_streams(ttl, %Subscriptions{} = state) do
-    %Subscriptions{streams_table: streams_table, started_at: started_at} = state
-
-    stale_epoch = monotonic_time() - started_at - ttl / 1_000
+  defp purge_expired_streams(ttl, %Subscriptions{streams_table: streams_table, started_at: started_at}) do
+    stale_epoch = monotonic_time() - started_at - (ttl / 1_000)
 
     streams_table
     |> :ets.select([{{:"$1", :"$2", :"$3"}, [{:"=<", :"$3", stale_epoch}], [:"$1"]}])
@@ -263,10 +276,9 @@ defmodule Commanded.Subscriptions do
   end
 
   defp parse_consistency(consistency) when consistency in [:eventual, :strong], do: consistency
-
   defp parse_consistency(consistency) when is_list(consistency) do
     Enum.map(consistency, fn
-      name when is_binary(name) ->
+      name when is_bitstring(name) ->
         name
 
       module when is_atom(module) ->
@@ -277,25 +289,22 @@ defmodule Commanded.Subscriptions do
         end
 
       invalid ->
-        raise "Invalid consistency: #{inspect(invalid)}"
+        raise "Invalid consistency: #{inspect invalid}"
     end)
   end
-
-  defp parse_consistency(invalid), do: raise("Invalid consistency: #{inspect(invalid)}")
+  defp parse_consistency(invalid), do: raise "Invalid consistency: #{inspect invalid}"
 
   defp parse_exclude(exclude), do: exclude |> List.wrap() |> MapSet.new()
 
-  defp monotonic_time, do: System.monotonic_time(:second)
+  defp monotonic_time, do: System.monotonic_time(:seconds)
 
   @default_ttl :timer.hours(1)
-  @default_consistency_timeout :timer.seconds(5)
+  @default_consistency_timeout :timer.seconds(50)
 
-  # Time to live (ttl) period for ack'd events before they can be safely purged (in milliseconds).
-  defp default_ttl do
-    Application.get_env(:commanded, :subscriptions_ttl, @default_ttl)
-  end
+  # time to live period for ack'd events before they can be safely purged in milliseconds
+  defp default_ttl,
+    do: Application.get_env(:commanded, :subscriptions_ttl, @default_ttl)
 
-  defp default_consistency_timeout do
-    Application.get_env(:commanded, :dispatch_consistency_timeout, @default_consistency_timeout)
-  end
+  defp default_consistency_timeout,
+    do: Application.get_env(:commanded, :dispatch_consistency_timeout, @default_consistency_timeout)
 end

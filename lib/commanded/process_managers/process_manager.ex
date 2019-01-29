@@ -33,12 +33,8 @@ defmodule Commanded.ProcessManagers.ProcessManager do
           # ...
         end
 
-        def error({:error, failure}, %ExampleEvent{}, _failure_context) do
-          # Retry, skip, ignore, or stop process manager on error handling event
-        end
-
         def error({:error, failure}, %ExampleCommand{}, _failure_context) do
-          # Retry, skip, ignore, or stop process manager on error dispatching command
+          # retry, skip, ignore, or stop process manager on error dispatching command
         end
       end
 
@@ -48,20 +44,19 @@ defmodule Commanded.ProcessManagers.ProcessManager do
 
   # Error handling
 
-  You can define an `c:error/3` callback function to handle any errors or
-  exceptions during event handling or returned by commands dispatched from your
-  process manager. The function is passed the error (e.g. `{:error, :failure}`),
-  the failed event or command, and a failure context.
-  See `Commanded.ProcessManagers.FailureContext` for details.
+  You can define an `c:error/3` callback function to handle any errors returned
+  by commands dispatched from your process manager. The function is passed the
+  command dispatch error (e.g. `{:error, :failure}`), the failed command, and a
+  failure context. See `Commanded.ProcessManagers.FailureContext` for details.
 
-  Use pattern matching on the error and/or failed event/command to explicitly
-  handle certain errors, events, or commands. You can choose to retry, skip,
-  ignore, or stop the process manager after a command dispatch error.
+  Use pattern matching on the error and/or failed command to explicitly handle
+  certain errors or commands. You can choose to retry, skip, ignore, or stop the
+  process manager after a command dispatch error.
 
   The default behaviour, if you don't provide an `c:error/3` callback, is to
   stop the process manager using the exact error reason returned from the
-  event handler function or command dispatch. You should supervise your
-  process managers to ensure they are restarted on error.
+  command dispatch. You should supervise your process managers to ensure they
+  are restarted on error.
 
   ## Example
 
@@ -132,40 +127,17 @@ defmodule Commanded.ProcessManagers.ProcessManager do
   instance or start a new process instance:
 
   - `{:start, process_uuid}` - create a new instance of the process manager.
-  - `{:start!, process_uuid}` - create a new instance of the process manager (strict).
   - `{:continue, process_uuid}` - continue execution of an existing process manager.
-  - `{:continue!, process_uuid}` - continue execution of an existing process manager (strict).
   - `{:stop, process_uuid}` - stop an existing process manager, shutdown its
     process, and delete its persisted state.
   - `false` - ignore the event.
 
-  You can return a list of process identifiers when a single domain event is to
+  You can return a list of process identifiers when a single domain event must
   be handled by multiple process instances.
-
-  ## Strict process routing
-
-  Using strict routing, with `:start!` or `:continue`, enforces the following
-  validation checks:
-
-  - `{:start!, process_uuid}` - validate process does not already exist.
-  - `{:continue!, process_uuid}` - validate process already exists.
-
-  If the check fails an error will be passed to the `error/3` callback function:
-
-  - `{:error, {:start!, :process_already_started}}`
-  - `{:error, {:continue!, :process_not_started}}`
-
-  The `error/3` function can choose to `:stop` the process or `:skip` the
-  problematic event.
-
   """
-  @callback interested?(domain_event) ::
-              {:start, process_uuid}
-              | {:start!, process_uuid}
-              | {:continue, process_uuid}
-              | {:continue!, process_uuid}
-              | {:stop, process_uuid}
-              | false
+  @callback interested?(domain_event) :: {:start, process_uuid}
+    | {:continue, process_uuid}
+    | {:stop, process_uuid} | false
 
   @doc """
   Process manager instance handles a domain event, returning any commands to
@@ -228,37 +200,27 @@ defmodule Commanded.ProcessManagers.ProcessManager do
   - `{:stop, reason}` - stop the process manager with the given reason.
 
   """
-  @callback error(
-              error :: term(),
-              failed_command :: command,
-              failure_context :: FailureContext.t()
-            ) ::
-              {:retry, context :: map()}
-              | {:retry, delay :: non_neg_integer(), context :: map()}
-              | {:skip, :discard_pending}
-              | {:skip, :continue_pending}
-              | {:continue, commands :: list(command), context :: map()}
-              | {:stop, reason :: term()}
+  @callback error(error :: term(), failed_command :: command, failure_context :: FailureContext.t()) :: {:retry, context :: map()}
+    | {:retry, delay :: non_neg_integer(), context :: map()}
+    | {:skip, :discard_pending}
+    | {:skip, :continue_pending}
+    | {:continue, commands :: list(command), context :: map()}
+    | {:stop, reason :: term()}
 
   @doc false
   defmacro __using__(opts) do
     quote location: :keep do
       @before_compile unquote(__MODULE__)
+      @on_definition {unquote(__MODULE__), :emit_deprecated_warnings}
 
       @behaviour Commanded.ProcessManagers.ProcessManager
 
       @opts unquote(opts) || []
       @name Commanded.Event.Handler.parse_name(__MODULE__, @opts[:name])
-      @router @opts[:router] || raise("#{inspect(__MODULE__)} expects `:router` to be given")
+      @router @opts[:router] || raise "#{inspect __MODULE__} expects `:router` to be given"
 
       def start_link(opts \\ []) do
-        opts =
-          Commanded.Event.Handler.start_opts(
-            __MODULE__,
-            Keyword.drop(@opts, [:name, :router]),
-            opts,
-            [:event_timeout]
-          )
+        opts = Commanded.Event.Handler.start_opts(__MODULE__, Keyword.drop(@opts, [:name, :router]), opts)
 
         Commanded.ProcessManagers.ProcessRouter.start_link(@name, __MODULE__, @router, opts)
       end
@@ -279,7 +241,7 @@ defmodule Commanded.ProcessManagers.ProcessManager do
           id: {__MODULE__, @name},
           start: {__MODULE__, :start_link, [opts]},
           restart: :permanent,
-          type: :worker
+          type: :worker,
         }
 
         Supervisor.child_spec(default, [])
@@ -293,7 +255,7 @@ defmodule Commanded.ProcessManagers.ProcessManager do
   @doc false
   defmacro __before_compile__(_env) do
     # include default fallback functions at end, with lowest precedence
-    quote generated: true do
+    quote do
       @doc false
       def interested?(_event), do: false
 
@@ -304,7 +266,40 @@ defmodule Commanded.ProcessManagers.ProcessManager do
       def apply(process_manager, _event), do: process_manager
 
       @doc false
-      def error({:error, reason}, _command, _failure_context), do: {:stop, reason}
+      def error({:error, reason}, failed, %{pending_commands: pending, context: context}) do
+        error({:error, reason}, failed, pending, context)
+      end
+
+      @doc false
+      def error({:error, reason}, _failed_command, _pending_commands, _context),
+        do: {:stop, reason}
     end
+  end
+
+  def emit_deprecated_warnings(env, _kind, name, args, _guards, _body) do
+    arity = length(args)
+    mod = env.module
+
+    case {name, arity} do
+      {:error, 4} ->
+        if Module.defines?(mod, {name, arity}) do
+          mod
+          |> error_deprecation_message
+          |> IO.warn()
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp error_deprecation_message(mod) do
+    """
+    Commanded Deprecation Warning:
+
+    Process manager #{mod} defined `error/4` callback, this has been deprecated in favor of `error/3`.
+
+    See https://github.com/commanded/commanded/blob/master/guides/Process%20Managers.md#deprecated-error4
+    """
   end
 end

@@ -65,20 +65,6 @@ defmodule Commanded.Event.Handler do
 
       {:ok, _handler} = ExampleHandler.start_link(start_from: :current)
 
-
-  ### Subscribing to an individual stream
-
-  By default event handlers will subscribe to all events appended to any stream.
-  Provide a `subscribe_to` option to subscribe to a single stream.
-
-      defmodule ExampleHandler do
-        use Commanded.Event.Handler,
-          name: __MODULE__,
-          subscribe_to: "stream1234"
-      end
-
-  This will ensure the handler only receives events appended to that stream.
-
   ## `c:init/0` callback
 
   You can define an `c:init/0` function in your handler to be called once it has
@@ -213,10 +199,9 @@ defmodule Commanded.Event.Handler do
   Return `:ok` on success, `{:error, :already_seen_event}` to ack and skip the
   event, or `{:error, reason}` on failure.
   """
-  @callback handle(domain_event, metadata) ::
-              :ok
-              | {:error, :already_seen_event}
-              | {:error, reason :: any()}
+  @callback handle(domain_event, metadata) :: :ok
+    | {:error, :already_seen_event}
+    | {:error, reason :: any()}
 
   @doc """
   Called when an event `handle/2` callback returns an error.
@@ -243,15 +228,10 @@ defmodule Commanded.Event.Handler do
   - `{:stop, reason}` - stop the event handler with the given reason.
 
   """
-  @callback error(
-              error :: term(),
-              failed_event :: domain_event,
-              failure_context :: FailureContext.t()
-            ) ::
-              {:retry, context :: map()}
-              | {:retry, delay :: non_neg_integer(), context :: map()}
-              | :skip
-              | {:stop, reason :: term()}
+  @callback error(error :: term(), failed_event :: domain_event, failure_context :: FailureContext.t()) :: {:retry, context :: map()}
+    | {:retry, delay :: non_neg_integer(), context :: map()}
+    | :skip
+    | {:stop, reason :: term()}
 
   @doc """
   Macro as a convenience for defining an event handler.
@@ -288,7 +268,7 @@ defmodule Commanded.Event.Handler do
           id: {__MODULE__, @name},
           start: {__MODULE__, :start_link, [opts]},
           restart: :permanent,
-          type: :worker
+          type: :worker,
         }
 
         Supervisor.child_spec(default, [])
@@ -300,26 +280,24 @@ defmodule Commanded.Event.Handler do
       @doc false
       def init, do: :ok
 
-      defoverridable init: 0
+      defoverridable [init: 0]
     end
   end
 
   @doc false
-  def parse_name(module, name) when name in [nil, ""],
-    do: raise("#{inspect(module)} expects `:name` to be given")
-
-  def parse_name(_module, name) when is_binary(name), do: name
+  def parse_name(module, name) when name in [nil, ""], do: raise "#{inspect module} expects `:name` to be given"
+  def parse_name(_module, name) when is_bitstring(name), do: name
   def parse_name(_module, name), do: inspect(name)
 
   @doc false
-  def start_opts(module, module_opts, local_opts, additional_allowed_opts \\ []) do
+  def start_opts(module, module_opts, local_opts) do
     {valid, invalid} =
       module_opts
       |> Keyword.merge(local_opts)
-      |> Keyword.split([:consistency, :start_from, :subscribe_to] ++ additional_allowed_opts)
+      |> Keyword.split([:consistency, :start_from])
 
     if Enum.any?(invalid) do
-      raise "#{inspect(module)} specifies invalid options: #{inspect(Keyword.keys(invalid))}"
+      raise "#{inspect module} specifies invalid options: #{inspect Keyword.keys(invalid)}"
     else
       valid
     end
@@ -329,7 +307,7 @@ defmodule Commanded.Event.Handler do
 
   @doc false
   defmacro __before_compile__(_env) do
-    quote generated: true do
+    quote do
       @doc false
       def handle(_event, _metadata), do: :ok
 
@@ -345,26 +323,24 @@ defmodule Commanded.Event.Handler do
     :handler_module,
     :last_seen_event,
     :subscribe_from,
-    :subscribe_to,
     :subscription
   ]
 
   @doc false
   def start_link(handler_name, handler_module, opts \\ []) do
     name = name(handler_name)
-
     handler = %Handler{
       handler_name: handler_name,
       handler_module: handler_module,
-      consistency: consistency(opts),
-      subscribe_from: start_from(opts),
-      subscribe_to: subscribe_to(opts)
+      consistency: opts[:consistency] || Application.get_env(:commanded, :default_consistency, :eventual),
+      subscribe_from: opts[:start_from] || :origin,
     }
 
     Registration.start_link(name, __MODULE__, handler)
   end
 
-  defp name(name), do: {__MODULE__, name}
+  @doc false
+  def name(name), do: {__MODULE__, name}
 
   @doc false
   def init(%Handler{} = state) do
@@ -382,23 +358,20 @@ defmodule Commanded.Event.Handler do
 
   @doc false
   def handle_call(:config, _from, %Handler{} = state) do
-    %Handler{consistency: consistency, subscribe_from: subscribe_from, subscribe_to: subscribe_to} =
-      state
+    %Handler{consistency: consistency, subscribe_from: subscribe_from} = state
 
-    config = [consistency: consistency, start_from: subscribe_from, subscribe_to: subscribe_to]
-
-    {:reply, config, state}
+    {:reply, [consistency: consistency, start_from: subscribe_from], state}
   end
 
   @doc false
   def handle_cast(:subscribe_to_events, %Handler{} = state) do
-    {:noreply, subscribe_to_events(state)}
+    {:noreply, subscribe_to_all_streams(state)}
   end
 
   @doc false
   # Subscription to event store has successfully subscribed, init event handler
   def handle_info({:subscribed, subscription}, %Handler{subscription: subscription} = state) do
-    Logger.debug(fn -> describe(state) <> " has successfully subscribed to event store" end)
+    Logger.warn(fn -> describe(state) <> " has successfully subscribed to event store" end)
 
     %Handler{
       consistency: consistency,
@@ -408,13 +381,13 @@ defmodule Commanded.Event.Handler do
 
     case handler_module.init() do
       :ok ->
-        # Register this event handler as a subscription with the given consistency
+        # register this event handler as a subscription with the given consistency
         :ok = Subscriptions.register(handler_name, consistency)
 
         {:noreply, state}
 
       {:stop, reason} ->
-        Logger.debug(fn -> describe(state) <> " `init/0` callback has requested to stop" end)
+        Logger.warn(fn -> describe(state) <> " `init/0` callback has requested to stop" end)
 
         {:stop, reason, state}
     end
@@ -422,7 +395,7 @@ defmodule Commanded.Event.Handler do
 
   @doc false
   def handle_info({:events, events}, %Handler{} = state) do
-    Logger.debug(fn -> describe(state) <> " received events: #{inspect(events)}" end)
+    # Logger.warn(fn -> describe(state) <> " received events: #{inspect (events |> Enum.map(&(&1.data.__struct__ )))}" end)
 
     try do
       state = Enum.reduce(events, state, &handle_event/2)
@@ -430,68 +403,53 @@ defmodule Commanded.Event.Handler do
       {:noreply, state}
     catch
       {:error, reason} ->
-        # stop after event handling returned an error
+
+        Logger.warn(fn -> describe(state) <> "ERROR_REASON" <> reason end)
         {:stop, reason, state}
     end
   end
 
-  defp subscribe_to_events(%Handler{} = state) do
+  defp subscribe_to_all_streams(%Handler{} = state) do
     %Handler{
       handler_name: handler_name,
-      subscribe_from: subscribe_from,
-      subscribe_to: subscribe_to
+      subscribe_from: subscribe_from
     } = state
 
-    {:ok, subscription} =
-      EventStore.subscribe_to(subscribe_to, handler_name, self(), subscribe_from)
+    {:ok, subscription} = EventStore.subscribe_to_all_streams(handler_name, self(), subscribe_from)
 
     %Handler{state | subscription: subscription}
   end
 
   defp handle_event(event, handler, context \\ %{})
 
-  # Ignore already seen event.
-  defp handle_event(
-         %RecordedEvent{event_number: event_number} = event,
-         %Handler{last_seen_event: last_seen_event} = state,
-         _context
-       )
-       when not is_nil(last_seen_event) and event_number <= last_seen_event do
-    Logger.debug(fn -> describe(state) <> " has already seen event ##{inspect(event_number)}" end)
+  # ignore already seen events
+  defp handle_event(%RecordedEvent{event_number: event_number} = event, %Handler{last_seen_event: last_seen_event} = state, _context)
+    when not is_nil(last_seen_event) and event_number <= last_seen_event
+  do
+    # Logger.warn(fn -> describe(state) <> " has already seen event ##{inspect event_number}" end)
 
     confirm_receipt(event, state)
   end
 
-  # Delegate event to handler module.
-  defp handle_event(%RecordedEvent{} = event, %Handler{} = state, context) do
-    case delegate_event_to_handler(event, state) do
+  # delegate event to handler module
+  defp handle_event(%RecordedEvent{data: data} = event, %Handler{handler_module: handler_module} = state, context) do
+    # Logger.warn(fn ->  describe(state) <> " is going to apply for event #{inspect data.__struct__} handler_module #{handler_module}" end)
+    # Logger.warn(fn ->  describe(state) <> "#{inspect handler_module.handle(data, enrich_metadata(event))}" end)
+
+    case handler_module.handle(data, enrich_metadata(event)) do
       :ok ->
         confirm_receipt(event, state)
 
       {:error, :already_seen_event} ->
+        Logger.warn(fn -> describe(state) <> " already seen event " end)
         confirm_receipt(event, state)
 
       {:error, reason} = error ->
-        Logger.error(fn ->
-          describe(state) <>
-            " failed to handle event #{inspect(event)} due to: #{inspect(reason)}"
-        end)
+        Logger.warn(fn -> describe(state) <> " failed to handle event #{inspect event} due to: #{inspect reason}" end)
 
         handle_event_error(error, event, state, context)
-    end
-  end
-
-  defp delegate_event_to_handler(%RecordedEvent{} = event, %Handler{} = state) do
-    %RecordedEvent{data: data} = event
-    %Handler{handler_module: handler_module} = state
-
-    metadata = enrich_metadata(event)
-
-    try do
-      handler_module.handle(data, metadata)
-    rescue
-      e ->
-        {:error, e}
+      x ->
+        Logger.warn(fn -> describe(state) <> " fourth case #{inspect x}" end)
     end
   end
 
@@ -506,50 +464,42 @@ defmodule Commanded.Event.Handler do
 
     case handler_module.error(error, data, failure_context) do
       {:retry, context} when is_map(context) ->
-        # Retry the failed event
+        # retry the failed event
         Logger.info(fn -> describe(state) <> " is retrying failed event" end)
 
         handle_event(failed_event, state, context)
 
       {:retry, delay, context} when is_map(context) and is_integer(delay) and delay >= 0 ->
-        # Retry the failed event after waiting for the given delay, in milliseconds
-        Logger.info(fn ->
-          describe(state) <> " is retrying failed event after #{inspect(delay)}ms"
-        end)
+        # retry the failed event after waiting for the given delay, in milliseconds
+        Logger.info(fn -> describe(state) <> " is retrying failed event after #{inspect delay}ms" end)
 
         :timer.sleep(delay)
 
         handle_event(failed_event, state, context)
 
       :skip ->
-        # Skip the failed event by confirming receipt
-        Logger.info(fn -> describe(state) <> " is skipping event" end)
+        # skip the failed event by confirming receipt
+        Logger.warn(fn -> describe(state) <> " is skipping event" end)
 
         confirm_receipt(failed_event, state)
 
       {:stop, reason} ->
-        # Stop event handler
-        Logger.warn(fn -> describe(state) <> " has requested to stop: #{inspect(reason)}" end)
+        # stop event handler
+        Logger.warn(fn -> describe(state) <> " has requested to stop: #{inspect reason}" end)
 
         throw({:error, reason})
 
-      invalid ->
-        Logger.warn(fn ->
-          describe(state) <> " returned an invalid error response: #{inspect(invalid)}"
-        end)
+       invalid ->
+         Logger.warn(fn -> describe(state) <> " returned an invalid error reponse: #{inspect invalid}" end)
 
-        # Stop event handler with original error
-        throw(error)
+         # stop event handler with original error
+         throw(error)
     end
   end
 
-  # Confirm receipt of event
-  defp confirm_receipt(%RecordedEvent{} = event, %Handler{} = state) do
-    %RecordedEvent{event_number: event_number} = event
-
-    Logger.debug(fn ->
-      describe(state) <> " confirming receipt of event ##{inspect(event_number)}"
-    end)
+  # confirm receipt of event
+  defp confirm_receipt(%RecordedEvent{event_number: event_number} = event, %Handler{} = state) do
+    # Logger.warn(fn -> describe(state) <> " confirming receipt of event ##{inspect event_number}" end)
 
     ack_event(event, state)
 
@@ -562,7 +512,7 @@ defmodule Commanded.Event.Handler do
       handler_name: handler_name,
       subscription: subscription
     } = state
-
+    Logger.warn(fn -> "HANDLER:=> DO_ACK_EVENT #{handler_name} event: #{inspect event.data.__struct__}" end)
     :ok = EventStore.ack_event(subscription, event)
     :ok = Subscriptions.ack_event(handler_name, consistency, event)
   end
@@ -574,39 +524,14 @@ defmodule Commanded.Event.Handler do
     :stream_version,
     :correlation_id,
     :causation_id,
-    :created_at
+    :created_at,
   ]
 
-  defp enrich_metadata(%RecordedEvent{} = event) do
-    %RecordedEvent{metadata: metadata} = event
-
+  defp enrich_metadata(%RecordedEvent{metadata: metadata} = event) do
     event
     |> Map.from_struct()
     |> Map.take(@enrich_metadata_fields)
     |> Map.merge(metadata || %{})
-  end
-
-  defp consistency(opts) do
-    case opts[:consistency] || Application.get_env(:commanded, :default_consistency, :eventual) do
-      consistency when consistency in [:eventual, :strong] -> consistency
-      invalid -> raise "Invalid `consistency` option: #{inspect(invalid)}"
-    end
-  end
-
-  defp start_from(opts) do
-    case opts[:start_from] || :origin do
-      start_from when start_from in [:origin, :current] -> start_from
-      start_from when is_integer(start_from) -> start_from
-      invalid -> "Invalid `start_from` option: #{inspect(invalid)}"
-    end
-  end
-
-  defp subscribe_to(opts) do
-    case opts[:subscribe_to] || :all do
-      :all -> :all
-      stream when is_binary(stream) -> stream
-      invalid -> "Invalid `subscribe_to` option: #{inspect(invalid)}"
-    end
   end
 
   defp describe(%Handler{handler_module: handler_module}),

@@ -2,15 +2,14 @@ defmodule Commanded.Helpers.EventFactory do
   @moduledoc false
   alias Commanded.EventStore.RecordedEvent
 
-  def map_to_recorded_events(events, initial_event_number \\ 1) do
+  def map_to_recorded_events(events) do
     stream_id = UUID.uuid4()
     causation_id = UUID.uuid4()
     correlation_id = UUID.uuid4()
-    fields = [causation_id: causation_id, correlation_id: correlation_id, metadata: %{}]
 
     events
-    |> Commanded.Event.Mapper.map_to_event_data(fields)
-    |> Enum.with_index(initial_event_number)
+    |> Commanded.Event.Mapper.map_to_event_data(causation_id, correlation_id, %{})
+    |> Enum.with_index(1)
     |> Enum.map(fn {event, index} ->
       %RecordedEvent{
         event_id: UUID.uuid4(),
@@ -22,7 +21,7 @@ defmodule Commanded.Helpers.EventFactory do
         event_type: event.event_type,
         data: event.data,
         metadata: event.metadata,
-        created_at: now()
+        created_at: now(),
       }
     end)
   end

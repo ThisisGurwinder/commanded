@@ -1,6 +1,6 @@
 defmodule Commanded.Aggregates.Supervisor do
   @moduledoc """
-  Supervises `Commanded.Aggregates.Aggregate` instance processes.
+  Supervises `Commanded.Aggregates.Aggregate` instance processes
   """
 
   use Supervisor
@@ -15,16 +15,18 @@ defmodule Commanded.Aggregates.Supervisor do
   end
 
   @doc """
-  Open an aggregate instance process for the given aggregate module and unique
-  indentity.
+  Open an aggregate instance process for the given aggregate module and unique indentity
 
-  Returns `{:ok, aggregate_uuid}` when a process is sucessfully started, or is
-  already running.
+  Returns `{:ok, aggregate_uuid}` when a process is sucessfully started, or is already running.
   """
-  def open_aggregate(aggregate_module, aggregate_uuid) when is_binary(aggregate_uuid) do
+  def open_aggregate(aggregate_module, aggregate_uuid)
+
+  def open_aggregate(aggregate_module, aggregate_uuid)
+      when is_integer(aggregate_uuid) or is_atom(aggregate_uuid) or is_bitstring(aggregate_uuid) do
     Logger.debug(fn ->
-      "Locating aggregate process for `#{inspect(aggregate_module)}` with UUID " <>
+      "Locating aggregate process for `#{inspect(aggregate_module)}` with UUID #{
         inspect(aggregate_uuid)
+      }"
     end)
 
     name = Aggregate.name(aggregate_module, aggregate_uuid)
@@ -43,9 +45,6 @@ defmodule Commanded.Aggregates.Supervisor do
         reply
     end
   end
-
-  def open_aggregate(_aggregate_module, aggregate_uuid),
-    do: {:error, {:unsupported_aggregate_identity_type, aggregate_uuid}}
 
   def init(_) do
     children = [

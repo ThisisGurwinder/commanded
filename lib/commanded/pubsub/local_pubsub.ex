@@ -60,14 +60,9 @@ defmodule Commanded.PubSub.LocalPubSub do
   @spec track(String.t(), term) :: :ok
   @impl Commanded.PubSub
   def track(topic, key) when is_binary(topic) do
-    case Registry.match(LocalPubSub.Tracker, topic, key) do
-      [] ->
-        {:ok, _pid} = Registry.register(LocalPubSub.Tracker, topic, key)
-        :ok
+    {:ok, _} = Registry.register(LocalPubSub.Tracker, topic, key)
 
-      _matches ->
-        :ok
-    end
+    :ok
   end
 
   @doc """
@@ -76,6 +71,6 @@ defmodule Commanded.PubSub.LocalPubSub do
   @spec list(String.t()) :: [{term, pid}]
   @impl Commanded.PubSub
   def list(topic) when is_binary(topic) do
-    Registry.lookup(LocalPubSub.Tracker, topic) |> Enum.map(fn {pid, key} -> {key, pid} end)
+    Registry.match(LocalPubSub.Tracker, topic, :_) |> Enum.map(fn {pid, key} -> {key, pid} end)
   end
 end

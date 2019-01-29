@@ -1,13 +1,13 @@
 defmodule Commanded.Mixfile do
   use Mix.Project
 
-  @version "0.17.3"
+  @version "0.16.0"
 
   def project do
     [
       app: :commanded,
       version: @version,
-      elixir: "~> 1.6",
+      elixir: "~> 1.5",
       elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
       description: description(),
@@ -36,11 +36,9 @@ defmodule Commanded.Mixfile do
       "test/aggregates/support",
       "test/commands/support",
       "test/event/support",
-      "test/event_store/support",
       "test/example_domain",
       "test/helpers",
       "test/process_managers/support",
-      "test/pubsub/support",
       "test/registration/support",
       "test/support"
     ]
@@ -49,17 +47,17 @@ defmodule Commanded.Mixfile do
 
   defp deps do
     [
-      {:elixir_uuid, "~> 1.2"},
+      {:poison, "~> 3.1"},
+      {:uuid, "~> 1.1"},
 
       # Build & test tools
       {:dialyxir, "~> 0.5", only: :dev, runtime: false},
-      {:ex_doc, "~> 0.19", only: :dev},
-      {:mix_test_watch, "~> 0.9", only: :dev},
-      {:mox, "~> 0.4", only: :test},
+      {:ex_doc, "~> 0.17", only: :dev},
+      {:mix_test_watch, "~> 0.6", only: :dev},
+      {:mox, "~> 0.3", only: :test},
 
       # Optional dependencies
-      {:jason, "~> 1.1", optional: true},
-      {:phoenix_pubsub, "~> 1.1", optional: true}
+      {:phoenix_pubsub, "~> 1.0", optional: true}
     ]
   end
 
@@ -101,11 +99,10 @@ defmodule Commanded.Mixfile do
         "README*",
         "LICENSE*",
         "CHANGELOG*",
-        "test/event_store/support",
+        "test/event_store_adapter",
         "test/example_domain",
         "test/helpers",
-        "test/registration/support",
-        "test/support"
+        "test/registration"
       ],
       maintainers: ["Ben Smith"],
       licenses: ["MIT"],
